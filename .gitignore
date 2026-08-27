@@ -1,0 +1,10 @@
+# Temporary backups and archives
+*.zip
+*.gz
+*.json
+*.bson
+/tmp/
+
+# Environment files
+config.bat
+node_modules
