@@ -26,7 +26,7 @@ A complete and reliable solution to automatically back up your MongoDB database 
 | Feature | Description |
 |---|---|
 | 📅 **Date-Based Folders** | Automatically creates date-stamped directories (`YYYY-MM-DD`) on Google Drive |
-| 📦 **Compressed Archives** | Uses `.gz` format to minimize backup file size and bandwidth |
+| 📦 **JSON & ZIP Archives** | Converts BSON dumps to JSON and compresses into `.zip` archives |
 | 💾 **Disk Space Conservation** | Automatically removes local temporary dump files after upload |
 | 🧹 **Auto-Cleanup (Retention)** | Automatically removes backups older than 30 days from Google Drive |
 | ⚡ **Fully Automated** | Runs in the background via Linux Cron Job without manual intervention |
@@ -55,7 +55,7 @@ curl https://rclone.org/install.sh | sudo bash
 
 ```bash
 sudo apt update
-sudo apt install -y wget curl gnupg
+sudo apt install -y wget curl gnupg zip
 wget https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb
 sudo dpkg -i mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb
 rm -f mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb
@@ -162,6 +162,7 @@ BACKUP_DIR="/tmp/mongo_backups"
 DATE_FOLDER=$(date +%Y-%m-%d)
 TIME=$(date +%H-%M-%S)
 BACKUP_NAME="backup_$TIME"
+DUMP_DIR="$BACKUP_DIR/$BACKUP_NAME"
 
 # Destination path on Google Drive
 RCLONE_REMOTE="gdrive:MongoDB_Backups/$DATE_FOLDER"
@@ -170,18 +171,30 @@ RCLONE_REMOTE="gdrive:MongoDB_Backups/$DATE_FOLDER"
 MONGO_URI="your_mongodb_connection_string_here"
 
 # Create local temporary directory
-mkdir -p $BACKUP_DIR
+mkdir -p "$DUMP_DIR"
 
-# 3. Generate MongoDB dump archive (.gz compressed format)
-mongodump --uri="$MONGO_URI" --archive=$BACKUP_DIR/$BACKUP_NAME.gz --gzip
+# 3. Generate MongoDB dump (in BSON format)
+mongodump --uri="$MONGO_URI" --out="$DUMP_DIR"
 
-# 4. Upload to Google Drive
-rclone copy $BACKUP_DIR/$BACKUP_NAME.gz $RCLONE_REMOTE
+# 4. Convert BSON files to JSON and remove original BSON files
+find "$DUMP_DIR" -type f -name "*.bson" | while read -r bson_file; do
+    json_file="${bson_file%.bson}.json"
+    bsondump "$bson_file" > "$json_file"
+    rm -f "$bson_file"
+done
 
-# 5. Clean up local temporary file
-rm -f $BACKUP_DIR/$BACKUP_NAME.gz
+# 5. Create ZIP archive of all JSON files
+cd "$BACKUP_DIR"
+zip -r "$BACKUP_NAME.zip" "$BACKUP_NAME"
 
-# 6. Delete backup files and empty folders older than 30 days from Google Drive
+# 6. Upload .zip archive to Google Drive
+rclone copy "$BACKUP_DIR/$BACKUP_NAME.zip" "$RCLONE_REMOTE"
+
+# 7. Clean up local temporary directory and zip file
+rm -rf "$DUMP_DIR"
+rm -f "$BACKUP_DIR/$BACKUP_NAME.zip"
+
+# 8. Delete backups older than 30 days and empty folders from Google Drive
 rclone delete --min-age 30d "gdrive:MongoDB_Backups"
 rclone rmdirs --leave-root "gdrive:MongoDB_Backups"
 ```
@@ -235,11 +248,11 @@ After the backups run, files will be structured inside Google Drive as follows:
 Google Drive
 └── MongoDB_Backups/
     ├── 2026-08-25/
-    │   └── backup_02-00-00.gz
+    │   └── backup_02-00-00.zip
     ├── 2026-08-26/
-    │   └── backup_02-00-00.gz
+    │   └── backup_02-00-00.zip
     └── 2026-08-27/
-        └── backup_02-00-00.gz
+        └── backup_02-00-00.zip
 ```
 
 ---
@@ -248,19 +261,31 @@ Google Drive
 
 In the event of data recovery, restore the database from a backup file:
 
-### 1. Download the Archive from Google Drive
+### 1. Download the ZIP Archive from Google Drive
 
 ```bash
-rclone copy "gdrive:MongoDB_Backups/2026-08-26/backup_02-00-00.gz" /tmp/
+rclone copy "gdrive:MongoDB_Backups/2026-08-26/backup_02-00-00.zip" /tmp/
 ```
 
-### 2. Restore Data into MongoDB
+### 2. Extract the Backup Files
 
 ```bash
-mongorestore --uri="YOUR_MONGODB_URI" --archive=/tmp/backup_02-00-00.gz --gzip --drop
+mkdir -p /tmp/restore
+unzip /tmp/backup_02-00-00.zip -d /tmp/restore
 ```
 
-> **Note:** The `--drop` flag replaces existing collections with the data from the backup archive.
+### 3. Restore JSON Data into MongoDB
+
+Using `mongoimport` for each JSON collection file:
+
+```bash
+find /tmp/restore -type f -name "*.json" | while read -r json_file; do
+    collection=$(basename "$json_file" .json)
+    mongoimport --uri="YOUR_MONGODB_URI" --collection="$collection" --file="$json_file" --drop
+done
+```
+
+> **Note:** The `--drop` flag replaces existing collections with the data from the backup files.
 
 ---
 
